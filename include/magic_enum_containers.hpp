@@ -176,8 +176,8 @@ class indexing {
   }
 };
 
-template <typename E, typename Less>
-class indexing<E, Less, std::enable_if_t<std::is_enum_v<std::decay_t<E>> && (std::is_same_v<Less, std::less<E>> || std::is_same_v<Less, std::less<>>)>> {
+template <typename E, typename Cmp>
+class indexing<E, Cmp, std::enable_if_t<std::is_enum_v<std::decay_t<E>> && (std::is_same_v<Cmp, std::less<E>> || std::is_same_v<Cmp, std::less<>>)>> {
  public:
    static constexpr auto& values = enum_values<E>();
 
@@ -192,63 +192,89 @@ class indexing<E, Less, std::enable_if_t<std::is_enum_v<std::decay_t<E>> && (std
   [[nodiscard]] static constexpr optional<std::size_t> at(E val) noexcept { return enum_index(val); }
 };
 
-template <typename Less>
-struct indexing<void, Less, void> {
+template <typename Cmp>
+struct indexing<void, Cmp, void> {
   using is_transparent = std::true_type;
 
   template <typename E>
-  [[nodiscard]] static constexpr const E* begin() noexcept {
-    return indexing<E, Less>::begin();
-  }
-
-  template <typename E>
-  [[nodiscard]] static constexpr const E* end() noexcept {
-    return indexing<E, Less>::end();
-  }
-
-  template <typename E>
-  [[nodiscard]] constexpr optional<std::size_t> at(E val) noexcept {
-    return indexing<E, Less>::at(val);
+  [[nodiscard]] static constexpr optional<std::size_t> at(E val) noexcept {
+    return indexing<E, Cmp>::at(val);
   }
 };
 
-template <typename E = void, typename OP = std::less<>, typename = void>
+template <typename E = void, typename Cmp = std::less<>, typename = void>
 struct name_sort_impl {
-  [[nodiscard]] constexpr bool operator()(E e1, E e2) const noexcept { return OP{}(enum_name(e1), enum_name(e2)); }
-};
+  template <typename C = Cmp, typename = void>
+  struct FullCmp : C {};
 
-template <typename OP>
-struct name_sort_impl<void, OP> {
-  using is_transparent = std::true_type;
-  template <typename S = OP, typename = void>
-  struct FullCmp : S {};
-
-  template <typename S>
-  struct FullCmp<S, std::enable_if_t<!std::is_invocable_v<S, string_view, string_view> && std::is_invocable_v<S, char_type, char_type>>> {
-    [[nodiscard]] constexpr bool operator()(string_view s1, string_view s2) const noexcept { return lexicographical_compare<S>(s1, s2); }
+  template <typename C>
+  struct FullCmp<C, std::enable_if_t<!std::is_invocable_v<C, string_view, string_view> && std::is_invocable_v<C, char_type, char_type>>> {
+    [[nodiscard]] constexpr bool operator()(string_view s1, string_view s2) const noexcept { return lexicographical_compare<C>(s1, s2); }
   };
 
-  template <typename E1, typename E2>
-  [[nodiscard]] constexpr std::enable_if_t<
-      // at least one of need to be an enum type
-      (std::is_enum_v<std::decay_t<E1>> || std::is_enum_v<std::decay_t<E2>>) &&
-      // if both is enum, only accept if the same enum
-      (!std::is_enum_v<std::decay_t<E1>> || !std::is_enum_v<std::decay_t<E2>> || std::is_same_v<E1, E2>) &&
-      // is invocable with comparator
-      (std::is_invocable_r_v<bool, FullCmp<>, std::conditional_t<std::is_enum_v<std::decay_t<E1>>, string_view, E1>, std::conditional_t<std::is_enum_v<std::decay_t<E2>>, string_view, E2>>),
-      bool>
-  operator()(E1 e1, E2 e2) const noexcept {
-    using D1 = std::decay_t<E1>;
-    using D2 = std::decay_t<E2>;
+  [[nodiscard]] static constexpr auto get_indices() noexcept {
+    // reverse result index mapping
+    std::array<std::size_t, enum_count<E>()> rev_res{};
+
+    // std::iota
+    for (std::size_t i = 0; i < enum_count<E>(); ++i) {
+      rev_res[i] = i;
+    }
+
+    constexpr auto orig_values = enum_values<E>();
+    constexpr auto orig_names = enum_names<E>();
     constexpr FullCmp<> cmp{};
 
-    if constexpr (std::is_enum_v<D1> && std::is_enum_v<D2>) {
-      return cmp(enum_name(e1), enum_name(e2));
-    } else if constexpr (std::is_enum_v<D1>) {
-      return cmp(enum_name(e1), e2);
-    } else /* if constexpr (std::is_enum_v<D2>) */ {
-      return cmp(e1, enum_name(e2));
+    // ~std::sort
+    for (std::size_t i = 0; i < enum_count<E>(); ++i) {
+      for (std::size_t j = i + 1; j < enum_count<E>(); ++j) {
+        if (cmp(orig_names[rev_res[j]], orig_names[rev_res[i]])) {
+          auto tmp = rev_res[i];
+          rev_res[i] = rev_res[j];
+          rev_res[j] = tmp;
+        }
+      }
     }
+
+    std::array<E, enum_count<E>()> sorted_values{};
+    // reverse the sorted indices
+    std::array<std::size_t, enum_count<E>()> res{};
+    for (std::size_t i = 0; i < enum_count<E>(); ++i) {
+      res[rev_res[i]] = i;
+      sorted_values[i] = orig_values[rev_res[i]];
+    }
+
+    return std::pair{sorted_values, res};
+  }
+
+  static constexpr auto indices = get_indices();
+
+ public:
+  static constexpr auto& values = indices.first;
+
+  [[nodiscard]] static constexpr const E* begin() noexcept {
+    return values.data();
+  }
+
+  [[nodiscard]] static constexpr const E* end() noexcept {
+    return values.data() + values.size();
+  }
+
+  [[nodiscard]] static constexpr optional<std::size_t> at(E val) noexcept {
+    if (auto opt = enum_index(val)) {
+      return indices.second[*opt];
+    }
+    return {};
+  }
+};
+
+template <typename Cmp>
+struct name_sort_impl<void, Cmp> {
+  using is_transparent = std::true_type;
+
+  template <typename E>
+  [[nodiscard]] static constexpr optional<std::size_t> at(E val) noexcept {
+    return name_sort_impl<E, Cmp>::at(val);
   }
 };
 
@@ -836,9 +862,9 @@ explicit bitset(V starter) -> bitset<V>;
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //                                                           SET                                                             //
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-template <typename E, typename CExprLess = std::less<E>>
+template <typename E, typename Cmp = std::less<E>>
 class set {
-  using index_type = detail::indexing<E, CExprLess>;
+  using index_type = detail::indexing<E, Cmp>;
   struct Getter {
     constexpr const E& operator()(const set*, const E* p) const noexcept { return *p; }
   };
@@ -852,8 +878,8 @@ class set {
   using value_type = E;
   using size_type = std::size_t;
   using difference_type = std::ptrdiff_t;
-  using key_compare = CExprLess;
-  using value_compare = CExprLess;
+  using key_compare = Cmp;
+  using value_compare = Cmp;
   using reference = value_type&;
   using const_reference = const value_type&;
   using pointer = value_type*;
